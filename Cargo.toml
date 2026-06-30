@@ -1,9 +1,15 @@
 [package]
 name = "silero-vad-crs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "Lightweight Rust wrapper for the silero-vad-c voice activity detector"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/nipponjo/silero-vad-crs"
+homepage = "https://github.com/nipponjo/silero-vad-crs"
+documentation = "https://docs.rs/silero-vad-crs"
+keywords = ["vad", "silero", "audio", "speech", "ffi"]
+categories = ["multimedia::audio", "external-ffi-bindings", "science"]
 build = "build.rs"
 
 [dependencies]
