@@ -92,6 +92,24 @@ silero-vad-crs = { version = "0.1", features = ["sse"] }
 Use `avx2` only when the target CPU supports AVX2/FMA. Use `neon` for supported
 ARM targets.
 
+## Examples
+
+Run the full-audio benchmark example:
+
+```bash
+cargo run --release --example full_audio_benchmark
+```
+
+Run the chunked streaming benchmark example:
+
+```bash
+cargo run --release --example chunked_benchmark
+```
+
+Both examples generate dummy 16 kHz audio, run 10 iterations, and print runtime
+plus real-time factor. RTF is `processing_seconds / audio_seconds`, so values
+below `1.0` are faster than real time.
+
 ## Notes
 
 This crate is intended as a lightweight Rust wrapper around the C port, not a
