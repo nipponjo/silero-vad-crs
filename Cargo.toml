@@ -2,7 +2,7 @@
 name = "silero-vad-crs"
 version = "0.1.0"
 edition = "2024"
-description = "Self-contained static Rust FFI wrapper for Silero VAD C"
+description = "Lightweight Rust wrapper for the silero-vad-c voice activity detector"
 license = "MIT"
 build = "build.rs"
 

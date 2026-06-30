@@ -1,75 +1,34 @@
 # silero-vad-crs
 
-Rust wrapper around a vendored C implementation of the 16 kHz Silero VAD model.
+Rust bindings for [`silero-vad-c`](https://github.com/nipponjo/silero-vad-c), a
+C port of the 16 kHz [Silero VAD](https://github.com/snakers4/silero-vad)
+model.
 
-This crate uses Rust FFI, but it does not link to a prebuilt `.dll`, `.so`, or
-`.dylib`, and it does not run a Python script during `cargo build`. Instead,
-`build.rs` compiles the vendored C source and the already generated C weight
-file into a static native library.
+This crate provides a small safe Rust API over the C implementation. The model
+weights are embedded, and the native code is compiled by Cargo through a build
+script.
 
-## How to Build
+## Features
 
-From this folder:
+- wraps the `silero-vad-c` implementation
+- no ONNX Runtime / `ort` dependency
+- embedded model weights
+- simple full-audio and streaming APIs
+- optional SIMD build features: `sse`, `avx2`, `neon`
 
-```powershell
-cargo test
+## Install
+
+```toml
+[dependencies]
+silero-vad-crs = "0.1"
 ```
 
-What happens during the build:
+For a local checkout:
 
-1. Cargo runs `build.rs`.
-2. The `cc` crate compiles:
-   - `native/silero_vad.c`
-   - `native/silero_vad_weights.c`
-3. Cargo links that compiled C code into the Rust crate.
-
-The final Rust program therefore contains the VAD implementation and weights in
-its own binary. There is no runtime shared-library path to manage and no
-dependency on a neighboring `silero-vad-c` checkout.
-
-## Reference Test Fixtures
-
-The integration test fixtures live in `tests/fixtures/`:
-
-- `tests_data_test.wav`
-- `ref_probs.csv`
-
-`tests/reference_probs.rs` loads the WAV, runs `SileroVad::forward_audio`, and
-compares every output probability against the CSV reference with a small float
-tolerance.
-
-## Vendored Native Files
-
-The native implementation lives in `native/`:
-
-- `silero_vad.c`
-- `silero_vad.h`
-- `silero_vad_simd.h`
-- `silero_vad_weights.c`
-- `silero_vad_weights.h`
-- `SILERO_VAD_C_LICENSE`
-
-`silero_vad_weights.c` is intentionally checked in. It contains the embedded
-model weights as C arrays, so building this Rust crate does not need Python,
-`safetensors`, `tinygrad`, or the original `silero-vad-c` folder.
-
-## Optional CPU Features
-
-The default build is the portable scalar C path:
-
-```powershell
-cargo build --release
+```toml
+[dependencies]
+silero-vad-crs = { path = "../silero-vad-crs" }
 ```
-
-You can enable the same SIMD compile switches exposed by the C project:
-
-```powershell
-cargo build --release --features sse
-cargo build --release --features avx2
-cargo build --release --features neon
-```
-
-Only enable CPU-specific features when the target machine supports them.
 
 ## Basic Use
 
@@ -79,12 +38,11 @@ use silero_vad_crs::{SileroVad, SAMPLE_RATE};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vad = SileroVad::new()?;
 
-    // 16 kHz mono f32 audio samples. This example is one second of silence.
+    // 16 kHz mono f32 audio samples.
     let audio = vec![0.0_f32; SAMPLE_RATE];
-
     let speech_probabilities = vad.forward_audio(&audio)?;
-    println!("{speech_probabilities:?}");
 
+    println!("{speech_probabilities:?}");
     Ok(())
 }
 ```
@@ -105,6 +63,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`forward_chunk` remembers the previous 64 samples for you. If you already have a
-576-sample buffer containing 64 context samples plus 512 fresh samples, use
-`forward_chunk_with_context`.
+`forward_chunk` keeps the 64-sample rolling left context for you. If your input
+already includes context, use `forward_chunk_with_context`.
+
+## Input Format
+
+The wrapped model expects:
+
+- 16 kHz sample rate
+- mono audio
+- `f32` samples, normally in `[-1.0, 1.0]`
+
+When converting 16-bit PCM WAV samples yourself:
+
+```rust
+let sample_f32 = sample_i16 as f32 / 32768.0;
+```
+
+## CPU Features
+
+The default build uses the portable scalar C path.
+
+```toml
+[dependencies]
+silero-vad-crs = { version = "0.1", features = ["sse"] }
+```
+
+Use `avx2` only when the target CPU supports AVX2/FMA. Use `neon` for supported
+ARM targets.
+
+## Notes
+
+This crate is intended as a lightweight Rust wrapper around the C port, not a
+Rust reimplementation of the neural network. For implementation details,
+including the FFI boundary and native build flow, see
+[`FFI_NOTES.md`](FFI_NOTES.md).

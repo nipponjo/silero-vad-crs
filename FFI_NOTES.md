@@ -1,3 +1,56 @@
+# FFI Notes
+
+This file explains how `silero-vad-crs` connects Rust to the vendored C port.
+The README is kept short for crates.io readers; this file is the place for build
+details and the Rust FFI learning notes.
+
+## Native Code Layout
+
+The native implementation lives in `native/`:
+
+- `silero_vad.c`
+- `silero_vad.h`
+- `silero_vad_simd.h`
+- `silero_vad_weights.c`
+- `silero_vad_weights.h`
+- `SILERO_VAD_C_LICENSE`
+
+`silero_vad_weights.c` contains the embedded model weights as C arrays. Because
+the generated weights are checked in, normal Rust builds do not need Python,
+`safetensors`, `tinygrad`, ONNX Runtime, or `ort`.
+
+## What Happens During `cargo build`
+
+Cargo runs `build.rs` before compiling the Rust library.
+
+`build.rs` asks the `cc` crate to compile:
+
+- `native/silero_vad.c`
+- `native/silero_vad_weights.c`
+
+The important line is:
+
+```rust
+build.compile("silero_vad_static");
+```
+
+That creates a static native library and tells Cargo to link it into the Rust
+crate. A final Rust binary using this crate contains the C implementation and
+weights in the binary itself, rather than loading a `.dll`, `.so`, or `.dylib`
+at runtime.
+
+## Optional Native Features
+
+The crate exposes Cargo features that map to the C port's compile-time switches:
+
+- `sse`
+- `avx2`
+- `neon`
+- `fast-math`
+
+The build script rejects `sse` and `avx2` together because they select different
+x86 SIMD paths. The default feature set uses the portable scalar path.
+
 ## What FFI Means
 
 FFI means "foreign function interface." It is how Rust calls functions written
@@ -68,7 +121,7 @@ let model = NonNull::new(model).ok_or(SileroVadError::CreateFailed)?;
 This is the core FFI pattern:
 
 1. Keep raw C calls in a small private module.
-2. Call them in tiny `unsafe` sections.
+2. Call them in small `unsafe` sections.
 3. Immediately convert raw pointers and status codes into normal Rust types.
 4. Expose safe methods like `forward_audio(&[f32]) -> Result<Vec<f32>, ...>`.
 5. Use `Drop` to release the C object automatically.
@@ -88,16 +141,14 @@ impl Drop for SileroVad {
 That means callers do not have to remember to manually call a C destroy
 function.
 
-## Why `build.rs` Exists
+## Reference Test Fixtures
 
-Cargo knows how to compile Rust. It does not automatically know how to compile
-C files. A build script fills that gap.
+The integration test fixtures live in `tests/fixtures/`:
 
-This crate's `build.rs` asks the `cc` crate to compile the vendored C files into
-a static library:
+- `tests_data_test.wav`
+- `ref_probs.csv`
 
-```rust
-build.compile("silero_vad_static");
-```
-
-Cargo then links that static library into the Rust build.
+`tests/reference_probs.rs` loads the WAV, runs `SileroVad::forward_audio`, and
+compares every output probability against the CSV reference with a small float
+tolerance. This checks that the Rust wrapper, native build, embedded weights,
+and audio sample conversion all still agree with the reference probabilities.
