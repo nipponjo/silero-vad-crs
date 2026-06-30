@@ -27,6 +27,17 @@ The final Rust program therefore contains the VAD implementation and weights in
 its own binary. There is no runtime shared-library path to manage and no
 dependency on a neighboring `silero-vad-c` checkout.
 
+## Reference Test Fixtures
+
+The integration test fixtures live in `tests/fixtures/`:
+
+- `tests_data_test.wav`
+- `ref_probs.csv`
+
+`tests/reference_probs.rs` loads the WAV, runs `SileroVad::forward_audio`, and
+compares every output probability against the CSV reference with a small float
+tolerance.
+
 ## Vendored Native Files
 
 The native implementation lives in `native/`:
