@@ -2,7 +2,7 @@
 name = "silero-vad-crs"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight Rust wrapper for the silero-vad-c voice activity detector"
+description = "Rust bindings for a C port of the Silero VAD voice activity detector"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/nipponjo/silero-vad-crs"
