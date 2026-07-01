@@ -1,4 +1,4 @@
-use silero_vad_crs::{SAMPLE_RATE, SileroVad};
+use silero_vad_crs::{get_timestamps_from_probs, SileroVad, SpeechTimestamp, SAMPLE_RATE};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -9,6 +9,10 @@ const TEST_AUDIO_PATH: &str = concat!(
 );
 const REFERENCE_PROBS_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ref_probs.csv");
+const REFERENCE_TIMESTAMPS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/ref_timestamps.csv"
+);
 const PROBABILITY_TOLERANCE: f32 = 1.0e-5;
 
 #[test]
@@ -44,6 +48,17 @@ fn full_audio_probabilities_match_reference_csv() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+#[test]
+fn timestamps_match_reference_python_postprocessing() -> Result<(), Box<dyn Error>> {
+    let reference_probabilities = read_reference_probabilities(Path::new(REFERENCE_PROBS_PATH))?;
+    let reference_timestamps = read_reference_timestamps(Path::new(REFERENCE_TIMESTAMPS_PATH))?;
+    let timestamps = get_timestamps_from_probs(&reference_probabilities, 960_000);
+
+    assert_eq!(timestamps, reference_timestamps);
+
+    Ok(())
+}
+
 fn read_reference_probabilities(path: &Path) -> Result<Vec<f32>, Box<dyn Error>> {
     let csv = fs::read_to_string(path)?;
     let probabilities = csv
@@ -56,6 +71,31 @@ fn read_reference_probabilities(path: &Path) -> Result<Vec<f32>, Box<dyn Error>>
         .collect::<Result<Vec<f32>, _>>()?;
 
     Ok(probabilities)
+}
+
+fn read_reference_timestamps(path: &Path) -> Result<Vec<SpeechTimestamp>, Box<dyn Error>> {
+    let csv = fs::read_to_string(path)?;
+    let timestamps = csv
+        .split([',', '\n', '\r'])
+        .filter_map(|field| {
+            let field = field.trim();
+            (!field.is_empty()).then_some(field)
+        })
+        .map(parse_reference_timestamp)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(timestamps)
+}
+
+fn parse_reference_timestamp(field: &str) -> Result<SpeechTimestamp, Box<dyn Error>> {
+    let (start, end) = field
+        .split_once('-')
+        .ok_or_else(|| format!("expected timestamp as start-end, got {field:?}"))?;
+
+    Ok(SpeechTimestamp {
+        start: start.parse()?,
+        end: end.parse()?,
+    })
 }
 
 fn read_mono_16khz_pcm_wav(path: &Path) -> Result<Vec<f32>, Box<dyn Error>> {

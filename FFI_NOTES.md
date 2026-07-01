@@ -147,8 +147,10 @@ The integration test fixtures live in `tests/fixtures/`:
 
 - `tests_data_test.wav`
 - `ref_probs.csv`
+- `ref_timestamps.csv`
 
 `tests/reference_probs.rs` loads the WAV, runs `SileroVad::forward_audio`, and
-compares every output probability against the CSV reference with a small float
-tolerance. This checks that the Rust wrapper, native build, embedded weights,
-and audio sample conversion all still agree with the reference probabilities.
+compares every output probability and timestamp against the CSV references.
+This checks that the Rust wrapper, native build, embedded weights, audio sample
+conversion, and timestamp post-processing all still agree with the reference
+outputs.
