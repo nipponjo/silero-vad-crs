@@ -1,4 +1,4 @@
-use silero_vad_crs::{SAMPLE_RATE, SileroVad};
+use silero_vad_crs::{SileroVad, SAMPLE_RATE};
 use std::error::Error;
 use std::time::Instant;
 

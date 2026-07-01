@@ -1,4 +1,4 @@
-use silero_vad_crs::{DEFAULT_CHUNK_SAMPLES, SAMPLE_RATE, SileroVad};
+use silero_vad_crs::{SileroVad, DEFAULT_CHUNK_SAMPLES, SAMPLE_RATE};
 use std::error::Error;
 use std::time::Instant;
 
