@@ -20,20 +20,13 @@ script.
 
 ```toml
 [dependencies]
-silero-vad-crs = "0.1"
-```
-
-For a local checkout:
-
-```toml
-[dependencies]
-silero-vad-crs = { path = "../silero-vad-crs" }
+silero-vad-crs = "0.2"
 ```
 
 ## Basic Use
 
 ```rust
-use silero_vad_crs::{SileroVad, SAMPLE_RATE};
+use silero_vad_crs::{SileroVad, SAMPLE_RATE, get_timestamps_from_probs};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vad = SileroVad::new()?;
@@ -41,8 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 16 kHz mono f32 audio samples.
     let audio = vec![0.0_f32; SAMPLE_RATE];
     let speech_probabilities = vad.forward_audio(&audio)?;
+    let timestamps = get_timestamps_from_probs(&speech_probabilities, audio.len());
 
-    println!("{speech_probabilities:?}");
+    println!("{timestamps:?}");
     Ok(())
 }
 ```
@@ -65,6 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `forward_chunk` keeps the 64-sample rolling left context for you. If your input
 already includes context, use `forward_chunk_with_context`.
+
+`get_timestamps_from_probs` returns sample-index timestamps with `start` and
+`end` fields. Use `get_timestamps_from_probs_with_config` to customize
+thresholds, minimum durations, and padding.
 
 ## Input Format
 

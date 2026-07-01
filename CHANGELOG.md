@@ -1,6 +1,12 @@
 Changelog
 =========
 
+0.2.0
+-----
+- Added probability-to-timestamp post-processing with `SpeechTimestamp` and
+  `get_timestamps_from_probs`.
+
+
 0.1.0
 -----
 
