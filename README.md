@@ -1,26 +1,27 @@
 # silero-vad-crs
 
-Rust bindings for [`silero-vad-c`](https://github.com/nipponjo/silero-vad-c), a
-C port of the 16 kHz [Silero VAD](https://github.com/snakers4/silero-vad)
-model.
+Silero voice activity detection (VAD) for Rust, built small and fast.
 
-This crate provides a small safe Rust API over the C implementation. The model
-weights are embedded, and the native code is compiled by Cargo through a build
-script.
+`silero-vad-crs` wraps [`silero-vad-c`](https://github.com/nipponjo/silero-vad-c),
+a C port of the [Silero VAD](https://github.com/snakers4/silero-vad) model. It
+embeds the model weights and compiles the native code with Cargo, giving you
+full-audio and streaming VAD without ONNX Runtime, `ort`, or runtime
+model downloads.
 
 ## Features
 
 - wraps the `silero-vad-c` implementation
-- no ONNX Runtime / `ort` dependency
-- embedded model weights
-- simple full-audio and streaming APIs
-- optional SIMD build features: `sse`, `avx2`, `neon`
+- **no ONNX** Runtime / `ort` dependency
+- **embedded** model **weights**
+- simple **full-audio** and **streaming** APIs
+- full-audio and streaming **resampling** for non-16 kHz input
+- optional **SIMD** build features: `sse`, `avx2`, `neon`
 
 ## Install
 
 ```toml
 [dependencies]
-silero-vad-crs = "0.2"
+silero-vad-crs = "0.3"
 ```
 
 ## Basic Use
@@ -41,7 +42,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For streaming, pass 512 new samples at a time:
+For full-audio input at another sample rate, create the model with that rate:
+
+```rust
+use silero_vad_crs::{SileroVad, TimestampConfig, get_timestamps_from_probs_with_config};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vad = SileroVad::with_sample_rate(48_000)?;
+
+    // 48 kHz mono f32 audio samples. The model resamples internally.
+    let audio = vec![0.0_f32; 48_000];
+    let speech_probabilities = vad.forward_audio(&audio)?;
+    let timestamps = get_timestamps_from_probs_with_config(
+        &speech_probabilities,
+        audio.len(),
+        TimestampConfig {
+            sampling_rate: vad.sampling_rate(),
+            window_size_samples: vad.source_window_samples(),
+            ..Default::default()
+        },
+    );
+
+    println!("{timestamps:?}");
+    Ok(())
+}
+```
+
+`get_timestamps_from_probs` returns sample-index timestamps with `start` and
+`end` fields. Use `get_timestamps_from_probs_seconds` if you want `start` and
+`end` in seconds. Use the `_with_config` variants to customize thresholds,
+minimum durations, padding, and non-16 kHz timestamp conversion.
+
+## Streaming Usage
+
+For 16 kHz streaming, pass 512 new samples at a time:
 
 ```rust
 use silero_vad_crs::{SileroVad, DEFAULT_CHUNK_SAMPLES};
@@ -57,20 +91,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`forward_chunk` keeps the 64-sample rolling left context for you. If your input
-already includes context, use `forward_chunk_with_context`.
+For streaming at another sample rate, use `source_window_samples()` as the
+fresh chunk size:
 
-`get_timestamps_from_probs` returns sample-index timestamps with `start` and
-`end` fields. Use `get_timestamps_from_probs_with_config` to customize
-thresholds, minimum durations, and padding.
+```rust
+use silero_vad_crs::SileroVad;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vad = SileroVad::with_sample_rate(48_000)?;
+    let chunk = vec![0.0_f32; vad.source_window_samples()];
+
+    let speech_probability = vad.forward_chunk(&chunk)?;
+    println!("{speech_probability}");
+
+    Ok(())
+}
+```
+
+`forward_chunk` keeps the rolling 16 kHz model context for you and resamples
+fresh chunks when needed. If your input already includes 16 kHz context, use
+`forward_chunk_with_context`.
+
+If incoming buffers are not exactly one VAD chunk long, use `push`:
+
+```rust
+use silero_vad_crs::SileroVad;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vad = SileroVad::with_sample_rate(48_000)?;
+
+    let small_buffer = vec![0.0_f32; 500];
+    let probabilities = vad.push(&small_buffer)?;
+
+    // `probabilities` may be empty until enough samples have accumulated.
+    println!("{probabilities:?}");
+
+    Ok(())
+}
+```
+
+`push` buffers incomplete chunks internally and returns one probability for each
+complete chunk it can process. Short buffers may return no probabilities yet;
+longer buffers may return multiple probabilities from one call.
 
 ## Input Format
 
 The wrapped model expects:
 
-- 16 kHz sample rate
 - mono audio
 - `f32` samples, normally in `[-1.0, 1.0]`
+
+`SileroVad::new()` expects 16 kHz audio. `SileroVad::with_sample_rate(rate)`
+accepts full-audio and streaming input at `rate` and resamples internally to
+16 kHz.
 
 When converting 16-bit PCM WAV samples yourself:
 
@@ -84,7 +157,7 @@ The default build uses the portable scalar C path.
 
 ```toml
 [dependencies]
-silero-vad-crs = { version = "0.1", features = ["sse"] }
+silero-vad-crs = { version = "0.3", features = ["sse"] }
 ```
 
 Use `avx2` only when the target CPU supports AVX2/FMA. Use `neon` for supported

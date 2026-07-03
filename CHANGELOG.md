@@ -1,11 +1,20 @@
 Changelog
 =========
 
+0.3.0
+-----
+- Added full-audio and streaming support for non-16 kHz input by resampling
+  internally to 16 kHz before VAD inference.
+- Added sample-rate-aware probability counts and source window size helpers.
+- Added `SileroVad::push` for streaming buffers that are not exactly one VAD
+  chunk long.
+- Added seconds-based timestamp helpers for callers that want speech segment
+  times instead of sample indices.
+
 0.2.0
 -----
 - Added probability-to-timestamp post-processing with `SpeechTimestamp` and
   `get_timestamps_from_probs`.
-
 
 0.1.0
 -----
