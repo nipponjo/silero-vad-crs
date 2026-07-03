@@ -9,7 +9,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::ptr::NonNull;
 
-/// The sample rate supported by the wrapped 16 kHz Silero VAD C model.
+/// The native Silero VAD model sample rate.
 pub const SAMPLE_RATE: usize = 16_000;
 
 /// Number of previous samples prepended to each streaming chunk.
@@ -23,7 +23,7 @@ pub const DEFAULT_INPUT_SAMPLES: usize = DEFAULT_CONTEXT_SAMPLES + DEFAULT_CHUNK
 
 /// A detected speech segment.
 ///
-/// `start` and `end` are sample indices in the original 16 kHz audio.
+/// `start` and `end` are sample indices in the original audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeechTimestamp {
     /// Inclusive start sample of the speech segment.
@@ -32,9 +32,36 @@ pub struct SpeechTimestamp {
     pub end: usize,
 }
 
+impl SpeechTimestamp {
+    /// Convert this timestamp from sample indices to seconds.
+    ///
+    /// `sampling_rate` must be the sample rate of the audio used to create the
+    /// timestamp. For example, a timestamp at sample `16_000` is `1.0` second
+    /// when the audio sample rate is 16 kHz.
+    pub fn to_seconds(self, sampling_rate: usize) -> SpeechTimestampSeconds {
+        assert!(sampling_rate > 0, "sampling_rate must be greater than zero");
+
+        SpeechTimestampSeconds {
+            start: self.start as f32 / sampling_rate as f32,
+            end: self.end as f32 / sampling_rate as f32,
+        }
+    }
+}
+
+/// A detected speech segment expressed in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeechTimestampSeconds {
+    /// Inclusive start time of the speech segment, in seconds.
+    pub start: f32,
+    /// Exclusive end time of the speech segment, in seconds.
+    pub end: f32,
+}
+
 /// Tuning options for [`get_timestamps_from_probs`].
 #[derive(Debug, Clone, Copy)]
 pub struct TimestampConfig {
+    /// Sample rate of the audio whose sample indices should be returned.
+    pub sampling_rate: usize,
     /// Probability at or above this value starts a speech segment.
     pub threshold: f32,
     /// Minimum speech duration kept in the output.
@@ -58,6 +85,7 @@ pub struct TimestampConfig {
 impl Default for TimestampConfig {
     fn default() -> Self {
         Self {
+            sampling_rate: SAMPLE_RATE,
             threshold: 0.5,
             min_speech_duration_ms: 250,
             max_speech_duration_s: f32::INFINITY,
@@ -92,6 +120,11 @@ pub enum SileroVadError {
     },
     /// The C library returned a non-OK status code.
     NativeStatus(SileroVadStatus),
+    /// Context-bearing chunk helpers currently expect 16 kHz input.
+    UnsupportedContextChunkSampleRate {
+        /// Sample rate configured for this model.
+        sampling_rate: usize,
+    },
 }
 
 impl fmt::Display for SileroVadError {
@@ -109,6 +142,10 @@ impl fmt::Display for SileroVadError {
                 "context length {context_samples} is invalid for model input length {input_samples}"
             ),
             Self::NativeStatus(status) => write!(formatter, "native Silero VAD error: {status:?}"),
+            Self::UnsupportedContextChunkSampleRate { sampling_rate } => write!(
+                formatter,
+                "context-bearing chunk inference expects {SAMPLE_RATE} Hz input, got {sampling_rate} Hz"
+            ),
         }
     }
 }
@@ -158,7 +195,10 @@ impl SileroVadStatus {
 pub struct SileroVad {
     model: NonNull<c_void>,
     input_samples: usize,
+    sampling_rate: usize,
+    source_window_samples: usize,
     context: Vec<f32>,
+    pending_samples: Vec<f32>,
 }
 
 impl SileroVad {
@@ -166,7 +206,15 @@ impl SileroVad {
     ///
     /// This uses the embedded weights compiled from `native/silero_vad_weights.c`.
     pub fn new() -> Result<Self, SileroVadError> {
-        Self::with_input_samples(DEFAULT_INPUT_SAMPLES)
+        Self::with_sample_rate(SAMPLE_RATE)
+    }
+
+    /// Create a model that accepts full-audio input at `sampling_rate`.
+    ///
+    /// If `sampling_rate` is not 16 kHz, full-audio input is resampled to
+    /// 16 kHz internally before inference.
+    pub fn with_sample_rate(sampling_rate: usize) -> Result<Self, SileroVadError> {
+        Self::with_input_samples_and_sample_rate(DEFAULT_INPUT_SAMPLES, sampling_rate)
     }
 
     /// Create a model using a custom native input length.
@@ -174,14 +222,29 @@ impl SileroVad {
     /// Most users should prefer [`new`](Self::new). The current C model is
     /// designed around 64 samples of context plus 512 fresh samples.
     pub fn with_input_samples(input_samples: usize) -> Result<Self, SileroVadError> {
+        Self::with_input_samples_and_sample_rate(input_samples, SAMPLE_RATE)
+    }
+
+    /// Create a model using a custom native input length and source sample rate.
+    pub fn with_input_samples_and_sample_rate(
+        input_samples: usize,
+        sampling_rate: usize,
+    ) -> Result<Self, SileroVadError> {
         let weights = unsafe { ffi::silero_vad_get_embedded_weights() };
-        let model = unsafe { ffi::silero_vad_model_create(weights, input_samples) };
+        let model = unsafe {
+            ffi::silero_vad_model_create_with_sample_rate(weights, input_samples, sampling_rate)
+        };
         let model = NonNull::new(model).ok_or(SileroVadError::CreateFailed)?;
+        let source_window_samples =
+            unsafe { ffi::silero_vad_model_get_source_window_samples(model.as_ptr()) };
 
         Ok(Self {
             model,
             input_samples,
+            sampling_rate,
+            source_window_samples,
             context: Vec::new(),
+            pending_samples: Vec::new(),
         })
     }
 
@@ -190,12 +253,25 @@ impl SileroVad {
         self.input_samples
     }
 
+    /// Return the sample rate expected by [`forward_audio`](Self::forward_audio).
+    pub fn sampling_rate(&self) -> usize {
+        self.sampling_rate
+    }
+
+    /// Return source-rate samples represented by one output probability step.
+    ///
+    /// At 16 kHz this is 512. At 48 kHz this is 1536.
+    pub fn source_window_samples(&self) -> usize {
+        self.source_window_samples
+    }
+
     /// Reset the native recurrent state and the Rust-side rolling context.
     pub fn reset(&mut self) {
         unsafe {
             ffi::silero_vad_model_reset(self.model.as_ptr());
         }
         self.context.clear();
+        self.pending_samples.clear();
     }
 
     /// Run one low-level model step on a chunk that already includes context.
@@ -204,6 +280,12 @@ impl SileroVad {
     /// normally 576 samples. The returned value is the speech probability for
     /// the current 512-sample step.
     pub fn forward_chunk_with_context(&mut self, chunk: &[f32]) -> Result<f32, SileroVadError> {
+        if self.sampling_rate != SAMPLE_RATE {
+            return Err(SileroVadError::UnsupportedContextChunkSampleRate {
+                sampling_rate: self.sampling_rate,
+            });
+        }
+
         if chunk.len() != self.input_samples {
             return Err(SileroVadError::InvalidInputLength {
                 expected: self.input_samples,
@@ -223,21 +305,73 @@ impl SileroVad {
         Ok(speech_probability)
     }
 
-    /// Run one streaming step on fresh audio and let Rust prepend context.
+    /// Run one streaming step on fresh audio.
     ///
-    /// With the default context length, pass 512 new samples. The wrapper
-    /// prepends 64 samples of remembered context for the C model and stores the
-    /// tail for the next call.
+    /// Pass [`source_window_samples`](Self::source_window_samples) fresh samples
+    /// at this model's configured sample rate. The native model resamples the
+    /// chunk when needed and keeps the rolling 16 kHz context internally.
     pub fn forward_chunk(&mut self, chunk: &[f32]) -> Result<f32, SileroVadError> {
-        self.forward_chunk_with_rolling_context(chunk, DEFAULT_CONTEXT_SAMPLES)
+        if chunk.len() != self.source_window_samples {
+            return Err(SileroVadError::InvalidInputLength {
+                expected: self.source_window_samples,
+                actual: chunk.len(),
+            });
+        }
+
+        let mut speech_probability = 0.0_f32;
+        let status = unsafe {
+            ffi::silero_vad_model_forward_source_chunk(
+                self.model.as_ptr(),
+                chunk.as_ptr(),
+                chunk.len(),
+                &mut speech_probability,
+            )
+        };
+        SileroVadStatus::into_result(status)?;
+        Ok(speech_probability)
     }
 
-    /// Run one streaming step with a caller-selected rolling context size.
+    /// Push arbitrary-length streaming samples and process all complete chunks.
+    ///
+    /// This is a convenience layer over [`forward_chunk`](Self::forward_chunk).
+    /// It buffers any leftover samples that are shorter than
+    /// [`source_window_samples`](Self::source_window_samples) and prepends them
+    /// to the next call.
+    pub fn push(&mut self, samples: &[f32]) -> Result<Vec<f32>, SileroVadError> {
+        if samples.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut merged = Vec::with_capacity(self.pending_samples.len() + samples.len());
+        merged.extend_from_slice(&self.pending_samples);
+        merged.extend_from_slice(samples);
+
+        let mut probabilities = Vec::new();
+        let mut offset = 0;
+
+        while offset + self.source_window_samples <= merged.len() {
+            probabilities
+                .push(self.forward_chunk(&merged[offset..offset + self.source_window_samples])?);
+            offset += self.source_window_samples;
+        }
+
+        self.pending_samples.clear();
+        self.pending_samples.extend_from_slice(&merged[offset..]);
+        Ok(probabilities)
+    }
+
+    /// Run one 16 kHz streaming step with a caller-selected rolling context size.
     pub fn forward_chunk_with_rolling_context(
         &mut self,
         chunk: &[f32],
         context_samples: usize,
     ) -> Result<f32, SileroVadError> {
+        if self.sampling_rate != SAMPLE_RATE {
+            return Err(SileroVadError::UnsupportedContextChunkSampleRate {
+                sampling_rate: self.sampling_rate,
+            });
+        }
+
         if context_samples > self.input_samples {
             return Err(SileroVadError::InvalidContextLength {
                 context_samples,
@@ -270,10 +404,10 @@ impl SileroVad {
 
     /// Run full-audio inference and return one speech probability per step.
     ///
-    /// The input audio must be 16 kHz mono `f32` samples. The C implementation
-    /// handles chunking and resets model state at the start of the call.
+    /// The input audio must be mono `f32` samples at this model's configured
+    /// sample rate. Non-16 kHz input is resampled internally.
     pub fn forward_audio(&mut self, audio: &[f32]) -> Result<Vec<f32>, SileroVadError> {
-        let capacity = audio_probability_count(audio.len());
+        let capacity = audio_probability_count_for_sample_rate(audio.len(), self.sampling_rate);
         let mut probabilities = vec![0.0_f32; capacity];
         let mut written = 0_usize;
 
@@ -290,6 +424,7 @@ impl SileroVad {
         SileroVadStatus::into_result(status)?;
         probabilities.truncate(written);
         self.context.clear();
+        self.pending_samples.clear();
         Ok(probabilities)
     }
 }
@@ -305,6 +440,19 @@ impl Drop for SileroVad {
 /// Return how many probability values the C model will produce for `audio_samples`.
 pub fn audio_probability_count(audio_samples: usize) -> usize {
     unsafe { ffi::silero_vad_model_audio_prob_count(audio_samples) }
+}
+
+/// Return how many probability values the model will produce at `sampling_rate`.
+pub fn audio_probability_count_for_sample_rate(
+    audio_samples: usize,
+    sampling_rate: usize,
+) -> usize {
+    unsafe { ffi::silero_vad_model_audio_prob_count_for_sample_rate(audio_samples, sampling_rate) }
+}
+
+/// Return source-rate samples represented by one output probability step.
+pub fn source_window_samples_for_sample_rate(sampling_rate: usize) -> usize {
+    unsafe { ffi::silero_vad_model_source_window_samples(sampling_rate) }
 }
 
 /// Convert frame-level speech probabilities into speech timestamps.
@@ -324,13 +472,27 @@ pub fn get_timestamps_from_probs(
     )
 }
 
+/// Convert frame-level speech probabilities into speech timestamps in seconds.
+///
+/// This uses [`TimestampConfig::default`] and returns the same segments as
+/// [`get_timestamps_from_probs`], converted from sample indices to seconds.
+pub fn get_timestamps_from_probs_seconds(
+    speech_probs: &[f32],
+    audio_length_samples: usize,
+) -> Vec<SpeechTimestampSeconds> {
+    get_timestamps_from_probs(speech_probs, audio_length_samples)
+        .into_iter()
+        .map(|timestamp| timestamp.to_seconds(SAMPLE_RATE))
+        .collect()
+}
+
 /// Convert frame-level speech probabilities into speech timestamps with custom options.
 pub fn get_timestamps_from_probs_with_config(
     speech_probs: &[f32],
     audio_length_samples: usize,
     config: TimestampConfig,
 ) -> Vec<SpeechTimestamp> {
-    if speech_probs.is_empty() || config.window_size_samples == 0 {
+    if speech_probs.is_empty() || config.window_size_samples == 0 || config.sampling_rate == 0 {
         return Vec::new();
     }
 
@@ -338,14 +500,15 @@ pub fn get_timestamps_from_probs_with_config(
     let neg_threshold = config
         .neg_threshold
         .unwrap_or_else(|| (threshold - 0.15).max(0.01));
-    let min_speech_samples = SAMPLE_RATE as f64 * config.min_speech_duration_ms as f64 / 1000.0;
-    let speech_pad_samples = SAMPLE_RATE as f64 * config.speech_pad_ms as f64 / 1000.0;
-    let max_speech_samples = SAMPLE_RATE as f64 * config.max_speech_duration_s as f64
+    let sampling_rate = config.sampling_rate as f64;
+    let min_speech_samples = sampling_rate * config.min_speech_duration_ms as f64 / 1000.0;
+    let speech_pad_samples = sampling_rate * config.speech_pad_ms as f64 / 1000.0;
+    let max_speech_samples = sampling_rate * config.max_speech_duration_s as f64
         - config.window_size_samples as f64
         - 2.0 * speech_pad_samples;
-    let min_silence_samples = SAMPLE_RATE as f64 * config.min_silence_duration_ms as f64 / 1000.0;
+    let min_silence_samples = sampling_rate * config.min_silence_duration_ms as f64 / 1000.0;
     let min_silence_samples_at_max_speech =
-        SAMPLE_RATE as f64 * config.min_silence_at_max_speech_ms as f64 / 1000.0;
+        sampling_rate * config.min_silence_at_max_speech_ms as f64 / 1000.0;
 
     let mut triggered = false;
     let mut speeches = Vec::new();
@@ -486,6 +649,21 @@ pub fn get_timestamps_from_probs_with_config(
     speeches
 }
 
+/// Convert frame-level speech probabilities into speech timestamps in seconds.
+///
+/// This returns the same segments as [`get_timestamps_from_probs_with_config`],
+/// converted from sample indices to seconds using `config.sampling_rate`.
+pub fn get_timestamps_from_probs_seconds_with_config(
+    speech_probs: &[f32],
+    audio_length_samples: usize,
+    config: TimestampConfig,
+) -> Vec<SpeechTimestampSeconds> {
+    get_timestamps_from_probs_with_config(speech_probs, audio_length_samples, config)
+        .into_iter()
+        .map(|timestamp| timestamp.to_seconds(config.sampling_rate))
+        .collect()
+}
+
 fn apply_speech_padding(
     speeches: &mut [SpeechTimestamp],
     audio_length_samples: usize,
@@ -526,8 +704,11 @@ mod ffi {
     unsafe extern "C" {
         pub fn silero_vad_get_embedded_weights() -> *const c_void;
 
-        pub fn silero_vad_model_create(weights: *const c_void, input_samples: usize)
-            -> *mut c_void;
+        pub fn silero_vad_model_create_with_sample_rate(
+            weights: *const c_void,
+            input_samples: usize,
+            sampling_rate: usize,
+        ) -> *mut c_void;
 
         pub fn silero_vad_model_reset(model: *mut c_void);
 
@@ -539,7 +720,23 @@ mod ffi {
             speech_probability: *mut f32,
         ) -> i32;
 
+        pub fn silero_vad_model_forward_source_chunk(
+            model: *mut c_void,
+            input: *const f32,
+            input_samples: usize,
+            speech_probability: *mut f32,
+        ) -> i32;
+
         pub fn silero_vad_model_audio_prob_count(audio_samples: usize) -> usize;
+
+        pub fn silero_vad_model_audio_prob_count_for_sample_rate(
+            audio_samples: usize,
+            sampling_rate: usize,
+        ) -> usize;
+
+        pub fn silero_vad_model_source_window_samples(sampling_rate: usize) -> usize;
+
+        pub fn silero_vad_model_get_source_window_samples(model: *const c_void) -> usize;
 
         pub fn silero_vad_model_forward_audio(
             model: *mut c_void,
@@ -559,6 +756,107 @@ mod tests {
     #[test]
     fn reports_probability_count_for_empty_audio() {
         assert_eq!(audio_probability_count(0), 0);
+    }
+
+    #[test]
+    fn reports_source_window_samples_for_higher_sample_rate() {
+        assert_eq!(source_window_samples_for_sample_rate(16_000), 512);
+        assert_eq!(source_window_samples_for_sample_rate(48_000), 1536);
+    }
+
+    #[test]
+    fn converts_sample_timestamps_to_seconds() {
+        let timestamp = SpeechTimestamp {
+            start: 16_000,
+            end: 24_000,
+        };
+
+        assert_eq!(
+            timestamp.to_seconds(16_000),
+            SpeechTimestampSeconds {
+                start: 1.0,
+                end: 1.5,
+            }
+        );
+    }
+
+    #[test]
+    fn returns_timestamps_in_seconds_with_custom_sample_rate() {
+        let probabilities = [0.0, 0.9, 0.9, 0.0, 0.0, 0.0];
+        let timestamps = get_timestamps_from_probs_seconds_with_config(
+            &probabilities,
+            6_000,
+            TimestampConfig {
+                sampling_rate: 48_000,
+                threshold: 0.5,
+                min_speech_duration_ms: 0,
+                min_silence_duration_ms: 0,
+                speech_pad_ms: 0,
+                window_size_samples: 1_000,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            timestamps,
+            vec![SpeechTimestampSeconds {
+                start: 1_000.0 / 48_000.0,
+                end: 3_000.0 / 48_000.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn forwards_full_audio_with_resampling() {
+        let mut vad = SileroVad::with_sample_rate(48_000).unwrap();
+        let probabilities = vad.forward_audio(&vec![0.0; 48_000]).unwrap();
+
+        assert_eq!(vad.sampling_rate(), 48_000);
+        assert_eq!(vad.source_window_samples(), 1536);
+        assert_eq!(
+            probabilities.len(),
+            audio_probability_count_for_sample_rate(48_000, 48_000)
+        );
+        assert!(probabilities
+            .iter()
+            .all(|probability| probability.is_finite()));
+    }
+
+    #[test]
+    fn forwards_streaming_chunks_with_resampling() {
+        let mut vad = SileroVad::with_sample_rate(48_000).unwrap();
+        let probability = vad
+            .forward_chunk(&vec![0.0; vad.source_window_samples()])
+            .unwrap();
+
+        assert!(probability.is_finite());
+    }
+
+    #[test]
+    fn push_buffers_arbitrary_chunk_sizes() {
+        let mut vad = SileroVad::new().unwrap();
+
+        let first = vad
+            .push(&vec![0.0; DEFAULT_CHUNK_SAMPLES.div_ceil(2)])
+            .unwrap();
+        let second = vad.push(&vec![0.0; 2 * DEFAULT_CHUNK_SAMPLES]).unwrap();
+
+        assert!(first.is_empty());
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().all(|probability| probability.is_finite()));
+    }
+
+    #[test]
+    fn push_uses_source_window_size_for_resampled_streams() {
+        let mut vad = SileroVad::with_sample_rate(48_000).unwrap();
+        let chunk_len = vad.source_window_samples();
+
+        let first = vad.push(&vec![0.0; chunk_len - 1]).unwrap();
+        let second = vad.push(&[0.0]).unwrap();
+
+        assert!(first.is_empty());
+        assert_eq!(second.len(), 1);
+        assert!(second[0].is_finite());
     }
 
     #[test]

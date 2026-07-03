@@ -6,9 +6,11 @@ fn main() {
     let native_dir = manifest_dir.join("native");
     let c_source = native_dir.join("silero_vad.c");
     let weights_source = native_dir.join("silero_vad_weights.c");
+    let resample_source = native_dir.join("dsp").join("resample.c");
 
     println!("cargo:rerun-if-changed={}", c_source.display());
     println!("cargo:rerun-if-changed={}", weights_source.display());
+    println!("cargo:rerun-if-changed={}", resample_source.display());
     println!(
         "cargo:rerun-if-changed={}",
         native_dir.join("silero_vad.h").display()
@@ -21,11 +23,20 @@ fn main() {
         "cargo:rerun-if-changed={}",
         native_dir.join("silero_vad_weights.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_dir.join("dsp").join("resample.h").display()
+    );
 
-    compile_static_c_library(&native_dir, &c_source, &weights_source);
+    compile_static_c_library(&native_dir, &c_source, &weights_source, &resample_source);
 }
 
-fn compile_static_c_library(native_dir: &PathBuf, c_source: &PathBuf, weights_source: &PathBuf) {
+fn compile_static_c_library(
+    native_dir: &PathBuf,
+    c_source: &PathBuf,
+    weights_source: &PathBuf,
+    resample_source: &PathBuf,
+) {
     if cfg!(feature = "sse") && cfg!(feature = "avx2") {
         panic!("features `sse` and `avx2` cannot both be enabled");
     }
@@ -34,6 +45,7 @@ fn compile_static_c_library(native_dir: &PathBuf, c_source: &PathBuf, weights_so
     build
         .file(c_source)
         .file(weights_source)
+        .file(resample_source)
         .include(native_dir)
         .warnings(true);
 

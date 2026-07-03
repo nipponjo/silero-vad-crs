@@ -1140,17 +1140,70 @@ static SileroVadStatus silero_vad_model_alloc_buffers(SileroVadModel *model) {
   return SILERO_VAD_STATUS_OK;
 }
 
+static size_t silero_vad_round_ratio(size_t numerator_a, size_t numerator_b, size_t denominator) {
+  if (denominator == 0 || numerator_a == 0 || numerator_b == 0) {
+    return 0;
+  }
+
+  return ((numerator_a * numerator_b) + (denominator / 2)) / denominator;
+}
+
+static SileroVadStatus silero_vad_model_ensure_resampled_capacity(SileroVadModel *model,
+                                                                  size_t samples) {
+  float *resampled_audio;
+
+  if (model->resampled_audio_capacity >= samples) {
+    return SILERO_VAD_STATUS_OK;
+  }
+
+  resampled_audio = (float *)silero_vad_aligned_calloc(samples, sizeof(float));
+  if (resampled_audio == NULL) {
+    return SILERO_VAD_STATUS_ALLOCATION_FAILED;
+  }
+
+  silero_vad_aligned_free(model->resampled_audio);
+  model->resampled_audio = resampled_audio;
+  model->resampled_audio_capacity = samples;
+  return SILERO_VAD_STATUS_OK;
+}
+
 SileroVadStatus silero_vad_model_init(SileroVadModel *model,
                                       const SileroVadWeights *weights,
                                       size_t input_samples) {
+  return silero_vad_model_init_with_sample_rate(model,
+                                                weights,
+                                                input_samples,
+                                                SILERO_VAD_SAMPLE_RATE);
+}
+
+SileroVadStatus silero_vad_model_init_with_sample_rate(SileroVadModel *model,
+                                                       const SileroVadWeights *weights,
+                                                       size_t input_samples,
+                                                       size_t sampling_rate) {
   SileroVadStatus status;
 
-  if (model == NULL || input_samples == 0 || silero_vad_has_null_weights(weights)) {
+  if (model == NULL || input_samples == 0 || sampling_rate == 0 || silero_vad_has_null_weights(weights)) {
     return SILERO_VAD_STATUS_INVALID_ARGUMENT;
   }
 
   silero_vad_zero_model(model);
   model->input_samples = input_samples;
+  model->sampling_rate = sampling_rate;
+  model->source_window_samples = silero_vad_model_source_window_samples(sampling_rate);
+
+  if (sampling_rate != SILERO_VAD_SAMPLE_RATE) {
+    model->resampler = yl_resample_create((int)sampling_rate,
+                                          SILERO_VAD_SAMPLE_RATE,
+                                          6,
+                                          0.99f,
+                                          YL_RESAMPLE_SINC_HANN,
+                                          0.0f);
+    if (model->resampler == NULL) {
+      silero_vad_model_free(model);
+      return SILERO_VAD_STATUS_ALLOCATION_FAILED;
+    }
+  }
+
   model->stft_frames = silero_vad_conv1d_output_frames(input_samples + SILERO_VAD_STFT_RIGHT_PAD,
                                                        SILERO_VAD_STFT_FFT_SIZE,
                                                        SILERO_VAD_STFT_HOP_SIZE,
@@ -1232,6 +1285,14 @@ SileroVadStatus silero_vad_model_init(SileroVadModel *model,
 
 SileroVadModel *silero_vad_model_create(const SileroVadWeights *weights,
                                         size_t input_samples) {
+  return silero_vad_model_create_with_sample_rate(weights,
+                                                 input_samples,
+                                                 SILERO_VAD_SAMPLE_RATE);
+}
+
+SileroVadModel *silero_vad_model_create_with_sample_rate(const SileroVadWeights *weights,
+                                                        size_t input_samples,
+                                                        size_t sampling_rate) {
   SileroVadModel *model;
   SileroVadStatus status;
 
@@ -1240,7 +1301,7 @@ SileroVadModel *silero_vad_model_create(const SileroVadWeights *weights,
     return NULL;
   }
 
-  status = silero_vad_model_init(model, weights, input_samples);
+  status = silero_vad_model_init_with_sample_rate(model, weights, input_samples, sampling_rate);
   if (status != SILERO_VAD_STATUS_OK) {
     free(model);
     return NULL;
@@ -1255,6 +1316,10 @@ void silero_vad_model_reset(SileroVadModel *model) {
   }
 
   silero_vad_lstm_cell_reset(&model->lstm);
+  memset(model->stream_context, 0, sizeof(model->stream_context));
+  if (model->resampler != NULL) {
+    yl_resample_reset(model->resampler);
+  }
 }
 
 void silero_vad_model_free(SileroVadModel *model) {
@@ -1269,12 +1334,19 @@ void silero_vad_model_free(SileroVadModel *model) {
   silero_vad_conv1d_free(&model->final_conv);
   silero_vad_lstm_cell_free(&model->lstm);
   silero_vad_model_free_buffers(model);
+  yl_resample_destroy(model->resampler);
+  silero_vad_aligned_free(model->resampled_audio);
 
   model->input_samples = 0;
+  model->sampling_rate = 0;
+  model->source_window_samples = 0;
   model->stft_frames = 0;
   model->conv2_frames = 0;
   model->conv3_frames = 0;
   model->conv4_frames = 0;
+  model->resampler = NULL;
+  model->resampled_audio = NULL;
+  model->resampled_audio_capacity = 0;
 }
 
 void silero_vad_model_destroy(SileroVadModel *model) {
@@ -1287,13 +1359,45 @@ void silero_vad_model_destroy(SileroVadModel *model) {
 }
 
 size_t silero_vad_model_audio_prob_count(size_t audio_samples) {
-  const size_t window_size = 512;
+  return silero_vad_model_audio_prob_count_for_sample_rate(audio_samples,
+                                                           SILERO_VAD_SAMPLE_RATE);
+}
 
-  if (audio_samples == 0) {
+size_t silero_vad_model_audio_prob_count_for_sample_rate(size_t audio_samples,
+                                                        size_t sampling_rate) {
+  size_t resampled_samples;
+
+  if (audio_samples == 0 || sampling_rate == 0) {
     return 0;
   }
 
-  return (audio_samples + window_size - 1) / window_size;
+  if (sampling_rate == SILERO_VAD_SAMPLE_RATE) {
+    resampled_samples = audio_samples;
+  } else {
+    resampled_samples = yl_resample_out_len((int)sampling_rate,
+                                            SILERO_VAD_SAMPLE_RATE,
+                                            audio_samples);
+  }
+
+  return (resampled_samples + SILERO_VAD_WINDOW_SAMPLES - 1) / SILERO_VAD_WINDOW_SAMPLES;
+}
+
+size_t silero_vad_model_source_window_samples(size_t sampling_rate) {
+  if (sampling_rate == 0) {
+    return 0;
+  }
+
+  return silero_vad_round_ratio(sampling_rate,
+                                SILERO_VAD_WINDOW_SAMPLES,
+                                SILERO_VAD_SAMPLE_RATE);
+}
+
+size_t silero_vad_model_get_source_window_samples(const SileroVadModel *model) {
+  if (model == NULL) {
+    return 0;
+  }
+
+  return model->source_window_samples;
 }
 
 SileroVadStatus silero_vad_model_forward(SileroVadModel *model,
@@ -1354,16 +1458,85 @@ SileroVadStatus silero_vad_model_forward(SileroVadModel *model,
   return SILERO_VAD_STATUS_OK;
 }
 
+SileroVadStatus silero_vad_model_forward_source_chunk(SileroVadModel *model,
+                                                      const float *input,
+                                                      size_t input_samples,
+                                                      float *speech_probability) {
+  float chunk[SILERO_VAD_INPUT_SAMPLES];
+  const float *fresh_samples = input;
+  float fresh_resampled[SILERO_VAD_WINDOW_SAMPLES];
+  SileroVadStatus status;
+
+  if (model == NULL || input == NULL || speech_probability == NULL) {
+    return SILERO_VAD_STATUS_INVALID_ARGUMENT;
+  }
+
+  if (model->input_samples != SILERO_VAD_INPUT_SAMPLES ||
+      model->sampling_rate == 0 ||
+      model->source_window_samples == 0 ||
+      input_samples != model->source_window_samples) {
+    return SILERO_VAD_STATUS_INVALID_SHAPE;
+  }
+
+  if (model->sampling_rate != SILERO_VAD_SAMPLE_RATE) {
+    size_t resampled_samples = yl_resample_out_len((int)model->sampling_rate,
+                                                   SILERO_VAD_SAMPLE_RATE,
+                                                   input_samples);
+    size_t copy_samples;
+    size_t written;
+
+    if (model->resampler == NULL) {
+      return SILERO_VAD_STATUS_INVALID_SHAPE;
+    }
+
+    status = silero_vad_model_ensure_resampled_capacity(model, resampled_samples);
+    if (status != SILERO_VAD_STATUS_OK) {
+      return status;
+    }
+
+    written = yl_resample_process(model->resampler,
+                                  input,
+                                  input_samples,
+                                  model->resampled_audio);
+    if (written == 0) {
+      return SILERO_VAD_STATUS_ALLOCATION_FAILED;
+    }
+
+    memset(fresh_resampled, 0, sizeof(fresh_resampled));
+    copy_samples = written < SILERO_VAD_WINDOW_SAMPLES ? written : SILERO_VAD_WINDOW_SAMPLES;
+    memcpy(fresh_resampled, model->resampled_audio, copy_samples * sizeof(float));
+    fresh_samples = fresh_resampled;
+  }
+
+  memset(chunk, 0, sizeof(chunk));
+  memcpy(chunk, model->stream_context, SILERO_VAD_CONTEXT_SAMPLES * sizeof(float));
+  memcpy(chunk + SILERO_VAD_CONTEXT_SAMPLES,
+         fresh_samples,
+         SILERO_VAD_WINDOW_SAMPLES * sizeof(float));
+
+  status = silero_vad_model_forward(model, chunk, speech_probability);
+  if (status != SILERO_VAD_STATUS_OK) {
+    return status;
+  }
+
+  memcpy(model->stream_context,
+         chunk + SILERO_VAD_WINDOW_SAMPLES,
+         SILERO_VAD_CONTEXT_SAMPLES * sizeof(float));
+  return SILERO_VAD_STATUS_OK;
+}
+
 SileroVadStatus silero_vad_model_forward_audio(SileroVadModel *model,
                                                const float *audio,
                                                size_t audio_samples,
                                                float *speech_probabilities,
                                                size_t speech_probabilities_capacity,
                                                size_t *speech_probabilities_written) {
-  const size_t window_size = 512;
-  const size_t context_size = 64;
-  const size_t chunk_size = context_size + window_size;
-  const size_t required_probs = silero_vad_model_audio_prob_count(audio_samples);
+  const size_t window_size = SILERO_VAD_WINDOW_SAMPLES;
+  const size_t context_size = SILERO_VAD_CONTEXT_SAMPLES;
+  const size_t chunk_size = SILERO_VAD_INPUT_SAMPLES;
+  const float *model_audio = audio;
+  size_t model_audio_samples = audio_samples;
+  size_t required_probs;
   float context[64] = {0};
   float chunk[576];
   size_t start;
@@ -1377,6 +1550,12 @@ SileroVadStatus silero_vad_model_forward_audio(SileroVadModel *model,
     return SILERO_VAD_STATUS_INVALID_SHAPE;
   }
 
+  if (model->sampling_rate == 0) {
+    return SILERO_VAD_STATUS_INVALID_SHAPE;
+  }
+
+  required_probs = silero_vad_model_audio_prob_count_for_sample_rate(audio_samples,
+                                                                     model->sampling_rate);
   if (speech_probabilities_capacity < required_probs) {
     return SILERO_VAD_STATUS_INVALID_SHAPE;
   }
@@ -1388,8 +1567,37 @@ SileroVadStatus silero_vad_model_forward_audio(SileroVadModel *model,
     return SILERO_VAD_STATUS_OK;
   }
 
-  for (start = 0; start < audio_samples; start += window_size) {
-    size_t chunk_samples = audio_samples - start;
+  if (model->sampling_rate != SILERO_VAD_SAMPLE_RATE) {
+    size_t resampled_samples = yl_resample_out_len((int)model->sampling_rate,
+                                                   SILERO_VAD_SAMPLE_RATE,
+                                                   audio_samples);
+    size_t written;
+
+    if (model->resampler == NULL) {
+      return SILERO_VAD_STATUS_INVALID_SHAPE;
+    }
+
+    if (model->resampled_audio_capacity < resampled_samples) {
+      SileroVadStatus status = silero_vad_model_ensure_resampled_capacity(model, resampled_samples);
+      if (status != SILERO_VAD_STATUS_OK) {
+        return status;
+      }
+    }
+
+    written = yl_resample_process(model->resampler,
+                                  audio,
+                                  audio_samples,
+                                  model->resampled_audio);
+    if (written != resampled_samples) {
+      return SILERO_VAD_STATUS_ALLOCATION_FAILED;
+    }
+
+    model_audio = model->resampled_audio;
+    model_audio_samples = resampled_samples;
+  }
+
+  for (start = 0; start < model_audio_samples; start += window_size) {
+    size_t chunk_samples = model_audio_samples - start;
     float prob = 0.0f;
     SileroVadStatus status;
 
@@ -1399,7 +1607,7 @@ SileroVadStatus silero_vad_model_forward_audio(SileroVadModel *model,
 
     memset(chunk, 0, sizeof(chunk));
     memcpy(chunk, context, context_size * sizeof(float));
-    memcpy(chunk + context_size, audio + start, chunk_samples * sizeof(float));
+    memcpy(chunk + context_size, model_audio + start, chunk_samples * sizeof(float));
 
     status = silero_vad_model_forward(model, chunk, &prob);
     if (status != SILERO_VAD_STATUS_OK) {

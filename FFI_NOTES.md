@@ -27,6 +27,7 @@ Cargo runs `build.rs` before compiling the Rust library.
 
 - `native/silero_vad.c`
 - `native/silero_vad_weights.c`
+- `native/dsp/resample.c`
 
 The important line is:
 
@@ -102,6 +103,8 @@ It owns the native model pointer:
 pub struct SileroVad {
     model: NonNull<c_void>,
     input_samples: usize,
+    sampling_rate: usize,
+    source_window_samples: usize,
     context: Vec<f32>,
 }
 ```
@@ -109,7 +112,9 @@ pub struct SileroVad {
 That pointer is created by C:
 
 ```rust
-let model = unsafe { ffi::silero_vad_model_create(weights, input_samples) };
+let model = unsafe {
+    ffi::silero_vad_model_create_with_sample_rate(weights, input_samples, sampling_rate)
+};
 ```
 
 Then Rust checks the pointer:

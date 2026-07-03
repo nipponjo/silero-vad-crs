@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "dsp/resample.h"
+
 /*
  * Standalone C port of the 16 kHz Silero VAD model.
  *
@@ -10,8 +12,9 @@
  * and a full-model interface for chunked or full-audio inference.
  *
  * Current scope:
- * - sample rate: 16000 Hz
  * - model topology: fixed 16 kHz Silero VAD path
+ * - full-audio input can be resampled to 16 kHz when initialized with a
+ *   non-16 kHz sampling_rate
  * - streaming chunk shape: typically 576 samples
  *   (64 samples of left context + 512 new samples)
  *
@@ -39,9 +42,13 @@ extern "C" {
 #endif
 
 enum {
+  SILERO_VAD_SAMPLE_RATE = 16000,
   SILERO_VAD_STFT_FFT_SIZE = 256,
   SILERO_VAD_STFT_HOP_SIZE = 128,
   SILERO_VAD_STFT_RIGHT_PAD = 64,
+  SILERO_VAD_CONTEXT_SAMPLES = 64,
+  SILERO_VAD_WINDOW_SAMPLES = 512,
+  SILERO_VAD_INPUT_SAMPLES = 576,
   SILERO_VAD_STFT_BINS = 129,
   SILERO_VAD_HIDDEN_SIZE = 128
 };
@@ -110,6 +117,8 @@ typedef struct SileroVadLstmCell {
 
 typedef struct SileroVadModel {
   size_t input_samples;
+  size_t sampling_rate;
+  size_t source_window_samples;
   size_t stft_frames;
   size_t conv2_frames;
   size_t conv3_frames;
@@ -135,6 +144,10 @@ typedef struct SileroVadModel {
   float *fft_twiddle_cos;
   float *fft_twiddle_sin;
   unsigned short *fft_bitrev;
+  yl_resample_ctx *resampler;
+  float *resampled_audio;
+  size_t resampled_audio_capacity;
+  float stream_context[SILERO_VAD_CONTEXT_SAMPLES];
 } SileroVadModel;
 
 /* Computes the output frame count for a 1D convolution with symmetric padding. */
@@ -190,7 +203,7 @@ SILERO_VAD_API SileroVadStatus silero_vad_lstm_cell_forward(SileroVadLstmCell *c
                                                             float *hidden_out);
 
 /*
- * Initializes a full 16 kHz Silero VAD model instance.
+ * Initializes a full Silero VAD model instance for 16 kHz input.
  *
  * The supplied weights must match the layouts expected by SileroVadWeights.
  * For the current streaming-style model path, input_samples is typically 576:
@@ -199,9 +212,22 @@ SILERO_VAD_API SileroVadStatus silero_vad_lstm_cell_forward(SileroVadLstmCell *c
 SILERO_VAD_API SileroVadStatus silero_vad_model_init(SileroVadModel *model,
                                                      const SileroVadWeights *weights,
                                                      size_t input_samples);
+/*
+ * Initializes a model instance that accepts full-audio input at sampling_rate.
+ *
+ * Non-16 kHz full-audio and source-chunk input is resampled to 16 kHz
+ * internally before VAD inference.
+ */
+SILERO_VAD_API SileroVadStatus silero_vad_model_init_with_sample_rate(SileroVadModel *model,
+                                                                      const SileroVadWeights *weights,
+                                                                      size_t input_samples,
+                                                                      size_t sampling_rate);
 /* Allocates and initializes a model instance. Returns NULL on failure. */
 SILERO_VAD_API SileroVadModel *silero_vad_model_create(const SileroVadWeights *weights,
                                                        size_t input_samples);
+SILERO_VAD_API SileroVadModel *silero_vad_model_create_with_sample_rate(const SileroVadWeights *weights,
+                                                                        size_t input_samples,
+                                                                        size_t sampling_rate);
 
 /* Resets model state for a new utterance or stream. */
 SILERO_VAD_API void silero_vad_model_reset(SileroVadModel *model);
@@ -219,8 +245,16 @@ SILERO_VAD_API void silero_vad_model_destroy(SileroVadModel *model);
 SILERO_VAD_API SileroVadStatus silero_vad_model_forward(SileroVadModel *model,
                                                         const float *input,
                                                         float *speech_probability);
+SILERO_VAD_API SileroVadStatus silero_vad_model_forward_source_chunk(SileroVadModel *model,
+                                                                     const float *input,
+                                                                     size_t input_samples,
+                                                                     float *speech_probability);
 /* Returns the number of 512-sample probability steps produced for audio_samples. */
 SILERO_VAD_API size_t silero_vad_model_audio_prob_count(size_t audio_samples);
+SILERO_VAD_API size_t silero_vad_model_audio_prob_count_for_sample_rate(size_t audio_samples,
+                                                                        size_t sampling_rate);
+SILERO_VAD_API size_t silero_vad_model_source_window_samples(size_t sampling_rate);
+SILERO_VAD_API size_t silero_vad_model_get_source_window_samples(const SileroVadModel *model);
 /*
  * Runs full-audio inference using the internal 64-sample context logic.
  *
