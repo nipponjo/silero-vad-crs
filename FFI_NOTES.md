@@ -47,10 +47,19 @@ The crate exposes Cargo features that map to the C port's compile-time switches:
 - `sse`
 - `avx2`
 - `neon`
+- `wasm-simd`
+- `auto`
 - `fast-math`
 
 The build script rejects `sse` and `avx2` together because they select different
-x86 SIMD paths. The default feature set uses the portable scalar path.
+x86 SIMD paths. The `auto` feature enables SSE on supported x86/x86_64 targets
+or NEON on supported ARM/AArch64 targets. If `avx2` is explicitly enabled,
+`auto` does not also enable the SSE backend.
+The `wasm-simd` feature defines the C SIMD switch and passes
+`-msimd128` when compiling for `wasm32`. Because this crate compiles C code that
+uses standard C headers such as `math.h`, wasm builds also need a C toolchain
+with a matching wasm sysroot, for example a WASI SDK setup. The default feature
+set uses the portable scalar path.
 
 ## What FFI Means
 

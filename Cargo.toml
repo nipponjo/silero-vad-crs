@@ -1,6 +1,6 @@
 [package]
 name = "silero-vad-crs"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Rust bindings for a C port of the Silero VAD voice activity detector with zero runtime dependencies and SIMD support"
 license = "MIT"
@@ -19,7 +19,9 @@ cc = "1.2"
 
 [features]
 default = []
+auto = []
 sse = []
 avx2 = []
 neon = []
+wasm-simd = []
 fast-math = []

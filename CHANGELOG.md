@@ -1,6 +1,11 @@
 Changelog
 =========
 
+0.4.0
+-----
+- Added a `wasm-simd` native SIMD backend for WebAssembly targets with SIMD.
+- Added an `auto` feature that enables SSE or NEON when the target supports it.
+
 0.3.0
 -----
 - Added full-audio and streaming support for non-16 kHz input by resampling

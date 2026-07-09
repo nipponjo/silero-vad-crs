@@ -15,13 +15,13 @@ model downloads.
 - **embedded** model **weights**
 - simple **full-audio** and **streaming** APIs
 - full-audio and streaming **resampling** for non-16 kHz input
-- optional **SIMD** build features: `sse`, `avx2`, `neon`
+- optional **SIMD** build features: `auto`, `sse`, `avx2`, `neon`, `wasm-simd`
 
 ## Install
 
 ```toml
 [dependencies]
-silero-vad-crs = "0.3"
+silero-vad-crs = "0.4"
 ```
 
 ## Basic Use
@@ -157,11 +157,19 @@ The default build uses the portable scalar C path.
 
 ```toml
 [dependencies]
-silero-vad-crs = { version = "0.3", features = ["sse"] }
+silero-vad-crs = { version = "0.4", features = ["sse"] }
+```
+
+Use `auto` to enable SSE on supported x86/x86_64 targets or NEON on supported
+ARM/AArch64 targets:
+
+```toml
+[dependencies]
+silero-vad-crs = { version = "0.4", features = ["auto"] }
 ```
 
 Use `avx2` only when the target CPU supports AVX2/FMA. Use `neon` for supported
-ARM targets.
+ARM targets. Use `wasm-simd` for WebAssembly targets that support SIMD.
 
 ## Examples
 
