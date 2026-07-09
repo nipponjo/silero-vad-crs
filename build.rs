@@ -49,7 +49,11 @@ fn compile_static_c_library(
         .include(native_dir)
         .warnings(true);
 
-    if cfg!(feature = "sse") {
+    let enable_sse = cfg!(feature = "sse")
+        || (cfg!(feature = "auto") && !cfg!(feature = "avx2") && target_supports_sse());
+    let enable_neon = cfg!(feature = "neon") || (cfg!(feature = "auto") && target_supports_neon());
+
+    if enable_sse {
         build.define("SILERO_VAD_ENABLE_SSE", "1");
         if !is_msvc() && target_arch_is_32_bit_x86() {
             build.flag("-msse");
@@ -65,7 +69,7 @@ fn compile_static_c_library(
         }
     }
 
-    if cfg!(feature = "neon") {
+    if enable_neon {
         build.define("SILERO_VAD_ENABLE_NEON", "1");
     }
 
@@ -101,4 +105,27 @@ fn target_arch_is_32_bit_x86() -> bool {
 
 fn target_arch_is_wasm32() -> bool {
     env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32")
+}
+
+fn target_supports_sse() -> bool {
+    target_arch_is_x86_64() || target_feature_enabled("sse")
+}
+
+fn target_supports_neon() -> bool {
+    target_arch_is_aarch64() || target_feature_enabled("neon")
+}
+
+fn target_arch_is_x86_64() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "x86_64")
+}
+
+fn target_arch_is_aarch64() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "aarch64")
+}
+
+fn target_feature_enabled(feature: &str) -> bool {
+    env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|target_feature| target_feature == feature)
 }
