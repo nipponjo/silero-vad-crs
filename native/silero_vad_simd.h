@@ -17,10 +17,18 @@
 #define SILERO_VAD_SIMD_HAS_SSE 0
 #endif
 
+#if defined(SILERO_VAD_ENABLE_WASM_SIMD) && defined(__wasm_simd128__)
+#define SILERO_VAD_SIMD_HAS_WASM_SIMD 1
+#else
+#define SILERO_VAD_SIMD_HAS_WASM_SIMD 0
+#endif
+
 #if SILERO_VAD_SIMD_HAS_AVX2
 #include <immintrin.h>
 #elif defined(SILERO_VAD_ENABLE_NEON) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
 #include <arm_neon.h>
+#elif SILERO_VAD_SIMD_HAS_WASM_SIMD
+#include <wasm_simd128.h>
 #elif SILERO_VAD_SIMD_HAS_SSE
 #include <xmmintrin.h>
 #endif
@@ -33,6 +41,7 @@ extern "C" {
 #define SILERO_VAD_SIMD_BACKEND_SSE 1
 #define SILERO_VAD_SIMD_BACKEND_AVX2 2
 #define SILERO_VAD_SIMD_BACKEND_NEON 3
+#define SILERO_VAD_SIMD_BACKEND_WASM_SIMD 4
 
 #if SILERO_VAD_SIMD_HAS_AVX2
 #define SILERO_VAD_SIMD_BACKEND SILERO_VAD_SIMD_BACKEND_AVX2
@@ -42,6 +51,10 @@ typedef __m256 silero_vad_simd_f32;
 #define SILERO_VAD_SIMD_BACKEND SILERO_VAD_SIMD_BACKEND_NEON
 #define SILERO_VAD_SIMD_LANES 4
 typedef float32x4_t silero_vad_simd_f32;
+#elif SILERO_VAD_SIMD_HAS_WASM_SIMD
+#define SILERO_VAD_SIMD_BACKEND SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+#define SILERO_VAD_SIMD_LANES 4
+typedef v128_t silero_vad_simd_f32;
 #elif SILERO_VAD_SIMD_HAS_SSE
 #define SILERO_VAD_SIMD_BACKEND SILERO_VAD_SIMD_BACKEND_SSE
 #define SILERO_VAD_SIMD_LANES 4
@@ -60,6 +73,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_loadu_f32(const float *src) {
   return _mm256_loadu_ps(src);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vld1q_f32(src);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_v128_load(src);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_loadu_ps(src);
 #else
@@ -75,6 +90,8 @@ static inline void silero_vad_simd_storeu_f32(float *dst, silero_vad_simd_f32 v)
   _mm256_storeu_ps(dst, v);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   vst1q_f32(dst, v);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  wasm_v128_store(dst, v);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   _mm_storeu_ps(dst, v);
 #else
@@ -88,6 +105,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_splat_f32(float x) {
   return _mm256_set1_ps(x);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vdupq_n_f32(x);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_f32x4_splat(x);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_set1_ps(x);
 #else
@@ -109,6 +128,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_add_f32(silero_vad_simd_f32 a,
   return _mm256_add_ps(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vaddq_f32(a, b);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_f32x4_add(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_add_ps(a, b);
 #else
@@ -125,6 +146,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_mul_f32(silero_vad_simd_f32 a,
   return _mm256_mul_ps(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vmulq_f32(a, b);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_f32x4_mul(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_mul_ps(a, b);
 #else
@@ -152,6 +175,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_max_f32(silero_vad_simd_f32 a,
   return _mm256_max_ps(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vmaxq_f32(a, b);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_f32x4_max(a, b);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_max_ps(a, b);
 #else
@@ -167,6 +192,8 @@ static inline silero_vad_simd_f32 silero_vad_simd_sqrt_f32(silero_vad_simd_f32 a
   return _mm256_sqrt_ps(a);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_NEON
   return vsqrtq_f32(a);
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  return wasm_f32x4_sqrt(a);
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   return _mm_sqrt_ps(a);
 #else
@@ -195,6 +222,10 @@ static inline float silero_vad_simd_hsum_f32(silero_vad_simd_f32 v) {
   vst1q_f32(tmp, v);
   return tmp[0] + tmp[1] + tmp[2] + tmp[3];
   #endif
+#elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_WASM_SIMD
+  float tmp[4];
+  wasm_v128_store(tmp, v);
+  return tmp[0] + tmp[1] + tmp[2] + tmp[3];
 #elif SILERO_VAD_SIMD_BACKEND == SILERO_VAD_SIMD_BACKEND_SSE
   __m128 shuf = _mm_movehl_ps(v, v);
   __m128 sum = _mm_add_ps(v, shuf);

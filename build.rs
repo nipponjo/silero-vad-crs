@@ -69,6 +69,13 @@ fn compile_static_c_library(
         build.define("SILERO_VAD_ENABLE_NEON", "1");
     }
 
+    if cfg!(feature = "wasm-simd") {
+        build.define("SILERO_VAD_ENABLE_WASM_SIMD", "1");
+        if target_arch_is_wasm32() && !is_msvc() {
+            build.flag("-msimd128");
+        }
+    }
+
     if cfg!(feature = "fast-math") {
         if is_msvc() {
             build.flag("/fp:fast");
@@ -77,7 +84,7 @@ fn compile_static_c_library(
         }
     }
 
-    if !is_msvc() {
+    if !is_msvc() && !target_arch_is_wasm32() {
         println!("cargo:rustc-link-lib=m");
     }
 
@@ -90,4 +97,8 @@ fn is_msvc() -> bool {
 
 fn target_arch_is_32_bit_x86() -> bool {
     env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "x86")
+}
+
+fn target_arch_is_wasm32() -> bool {
+    env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32")
 }
